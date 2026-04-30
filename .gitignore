@@ -1,0 +1,21 @@
+# Sistema MacOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Conda e Python
+.conda/
+env/
+venv/
+__pycache__/
+*.py[cod]
+*.class
+
+# IDE
+.vscode/
+.idea/
+
+# Log e file temporanei del simulatore
+*.log
+build/
+dist/
