@@ -1,6 +1,6 @@
 #SCRIPT UTILIZZATO PER GIOCARE TRAMITE DUALSENSE SU UN MACM1 E RACCOGLIERE DATI
 import pygame
-import library.scriptGuida.snakeoil3_jm2 as snakeoil3
+import snakeoil3_jm2 as snakeoil3
 import json
 import sys
 

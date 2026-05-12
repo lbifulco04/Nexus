@@ -1,6 +1,6 @@
 #SCRIPT UTILIZZATO PER GIOCARE TRAMITE TASTIERA E RACCOGLIERE I DATI
 from pynput.keyboard import Key, Listener
-import library.scriptGuida.snakeoil3_jm2 as snakeoil3
+import snakeoil3_jm2 as snakeoil3
 import time
 import json
 import csv

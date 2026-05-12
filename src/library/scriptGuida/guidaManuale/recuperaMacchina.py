@@ -1,6 +1,6 @@
 #Questo script serve per iniziare una comunicazione UDP alla porta 3001 (default torcs) e registrae solo eventi critici
 import pygame
-import library.scriptGuida.snakeoil3_jm2 as snakeoil3
+import snakeoil3_jm2 as snakeoil3
 import json
 import sys
 import os

@@ -28,6 +28,44 @@ def normalizza_input_realtime(sensors):
     stato = np.concatenate([track, speedX, angle, trackPos, rpm])
     return np.expand_dims(stato, axis=0)
 
+def calcola_marcia_ottimale(rpm, marcia_attuale, sensori_track, velocita):
+    # 1. EMERGENZA MURO (Distanza frontale sensore 9)
+    if sensori_track < 4.5 and velocita < 5:
+        return -1
+    
+    # Se siamo in retro, usciamo solo con spazio libero
+    if marcia_attuale == -1:
+        return 1 if sensori_track > 12 else -1
+
+    # 2. LOGICA UPSHIFT (Salire di marcia)
+    upshift_thresholds = {
+        1: 16800,  # Cambiata anticipata per evitare pattinamento in 1ª
+        2: 17200,
+        3: 17500,
+        4: 17800,
+        5: 17800
+    }
+    
+    threshold_up = upshift_thresholds.get(marcia_attuale, 17800)
+    if rpm > threshold_up and marcia_attuale < 6:
+        return marcia_attuale + 1
+
+    # 3. LOGICA DOWNSHIFT (Scalare)
+    # Importante per il freno motore nel "Cavatappi" (il punto critico di Cork)
+    downshift_thresholds = {
+        6: 11000, # Scalata aggressiva per avere ripresa
+        5: 10500,
+        4: 10000,
+        3: 9500,
+        2: 8500   # Scalata prudente in 1ª per non bloccare il posteriore
+    }
+    
+    threshold_down = downshift_thresholds.get(marcia_attuale, 9000)
+    if rpm < threshold_down and marcia_attuale > 1:
+        return marcia_attuale - 1
+
+    return marcia_attuale
+
 def main():
     client = snakeoil3.Client(p=3001, vision=False)
     
@@ -60,11 +98,14 @@ def main():
             acceleratore = max(min(acceleratore, 1.0), 0.0)
             freno = max(min(freno, 1.0), 0.0)
 
-            # Logica cambio
+           # Logica cambio
             rpm = client.S.d.get('rpm', 0)
             marcia = client.S.d.get('gear', 1)
-            if rpm > 8000 and marcia < 6: marcia += 1
-            elif rpm < 2500 and marcia > 1: marcia -= 1
+            distanza_davanti = client.S.d.get('track')[9] # Sensore centrale (0 gradi)
+            speed_x = client.S.d.get('speedX', 0)
+
+            # Applichiamo la funzione
+            marcia = calcola_marcia_ottimale(rpm, marcia, distanza_davanti, speed_x)
 
             # INVIO DATI
             client.R.d.update({
