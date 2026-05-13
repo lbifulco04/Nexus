@@ -14,9 +14,9 @@ def costruisci_modello() -> keras.Model:
 
     Struttura:
         Input(23)
-           Dense(128) + BatchNorm + Dropout(0.3)     estrazione feature
-           Dense(64)  + BatchNorm + Dropout(0.15)    raffinamento
-           Dense(32)  + BatchNorm + Dropout(0.10)    compressione
+           Dense(128) + BatchNorm + Dropout(0.15)     estrazione feature
+           Dense(64)  + BatchNorm + Dropout(0.10)    raffinamento
+           Dense(32)  + BatchNorm + Dropout(0.05)    compressione
            Dense(32)  + BatchNorm                    separazione uscite
                                  
       uscita_sterzo(1, tanh)     uscita_pedali(2, sigmoid)
@@ -32,36 +32,27 @@ def costruisci_modello() -> keras.Model:
       Lo sterzo su Corkscrew è più critico dei pedali. 
     """
 
-    #definiamo l'input della rete iniziale (sono 23 dati i sensori in TORCS)
     inp = Input(shape=(23,), name="Ingresso_Sensori")
 
-    # Primo Layer
-    x = layers.Dense(128, activation='relu', name="dense_128")(inp)
-    x = layers.BatchNormalization(name="bn_128")(x)
-    x = layers.Dropout(0.30, name="drop_128")(x)
+    # Base Comune
+    x = layers.Dense(128, activation='relu')(inp) #relu trasforma i valori negativi in 0
+    #il primo strato presenta ben 128 neuroni che prendono in input tutti i sensori
 
-    #Secondo layer
-    x = layers.Dense(64, activation='relu', name="dense_64")(x)
-    x = layers.BatchNormalization(name="bn_64")(x)
-    x = layers.Dropout(0.15, name="drop_64")(x)
+    #Durante l'allenamento, "spegne" casualmente il 20% dei neuroni in ogni ciclo
+    #permettendo di evitare casi di overfittinig, e dunque la rete trova nuovi modi per risolvere il problema
+    x = layers.Dropout(0.2)(x)
 
-    #Terzo layer
-    x = layers.Dense(32, activation='relu', name="dense_32")(x)
-    x = layers.BatchNormalization(name="bn_32")(x)
-    x = layers.Dropout(0.10, name="drop_32")(x)
+    #inseriamo poi due layers con rispettivamente 64 e 32 
+    x = layers.Dense(64, activation='relu')(x)
+    x = layers.Dense(32, activation='relu')(x)
 
-    # Strato di separazione: prima di diramarsi, un altro Dense
-    # aiuta la rete a costruire rappresentazioni specifiche per sterzo/pedali
-    x = layers.Dense(32, activation='relu', name="dense_pre_uscita")(x)
-    x = layers.BatchNormalization(name="bn_pre_uscita")(x)
+    # Uscite separate
+    out_sterzo = layers.Dense(1, activation='tanh', name="uscita_sterzo")(x)
+    out_pedali = layers.Dense(2, activation='sigmoid', name="uscita_pedali")(x)
 
-    # ── Rami di uscita ────────────────────────────────────────────────────────
-    # tanh: sterzo in [-1, 1]
-    out_sterzo = layers.Dense(1, activation='tanh',
-                               name="uscita_sterzo")(x)
-    # sigmoid: accel e brake in [0, 1]
-    out_pedali = layers.Dense(2, activation='sigmoid',
-                               name="uscita_pedali")(x)
+    #il modello è in grado di dare dati 19 input , 3 output che sono sterzo, freno e pedali
+    modello = models.Model(inputs=inp, outputs=[out_sterzo, out_pedali])
+
 
     return models.Model(inputs=inp, outputs=[out_sterzo, out_pedali])
 
@@ -152,3 +143,4 @@ def valuta_per_categoria(modello: keras.Model,
         print("\n  ⚠️  MAE recupero > 0.20: il modello fa fatica con le manovre "
               "di emergenza. Considera più dati di recupero o oversampling maggiore.")
     print("=" * 55 + "\n")
+

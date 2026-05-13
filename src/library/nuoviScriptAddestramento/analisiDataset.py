@@ -1,6 +1,5 @@
-from config import (LOSS_WEIGHT_STERZO , LOSS_WEIGHT_PEDALI ,
-                    SOGLIA_STERZO_CURVA, SOGLIA_STERZO_RECUPERO  ,  
-                    OVERSAMPLE_RECUPERO)
+from config import ( SOGLIA_STERZO_CURVA, SOGLIA_STERZO_RECUPERO,  
+                    OVERSAMPLE_RECUPERO, JITTER_SENSORI_STD, PESO_CAMPIONE_CURVA, PESO_CAMPIONE_RECUPERO )
 import numpy as np
 
 def analizza_dataset(X: np.ndarray, Y: np.ndarray) -> None:
@@ -51,6 +50,11 @@ def analizza_dataset(X: np.ndarray, Y: np.ndarray) -> None:
               f"del totale. L'oversampling x{OVERSAMPLE_RECUPERO} è consigliato.")
     if n < 10000:
         print(f"\n  ⚠️  Dataset piccolo ({n} campioni). ")
+    if accel.mean() < 0.35:
+        print(" ⚠️  Accelerazione media bassa: troppo prudente")
+    if rett.sum() / n > 0.60:
+        print(f" ⚠️  Rettilinei sono {100*rett.sum()/n} : troppi")
+
 
     #Stampiamo anche i dati sull'accelerazione
     print("\n  ACCELERAZIONE")
@@ -59,48 +63,111 @@ def analizza_dataset(X: np.ndarray, Y: np.ndarray) -> None:
     print(f"    % in frenata   : {100*np.sum(freno > 0.1)/n:.1f}%")
     print("═" * 55 + "\n")
 
-
-
-def bilancia_dataset(X: np.ndarray,
-                     Y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def specchia_dataset(X:np.ndarray, Y:np.ndarray):
     """
-    Duplica i campioni con sterzata di recupero per compensare la loro
-    sottorappresentazione nel dataset.
-
-    Il modello DEVE saper recuperare in casi critici:
-    senza oversampling, la rete li tratta come outlier e li ignora.
-    Il risultato è un modello che va dritto anche quando dovrebbe sterzare forte.
-
-    Ritorna (X_bilanciato, Y_bilanciato) con i campioni di recupero duplicati.
+    Duplica il dataset specchiando i valori di sterzo trackpos
+    angolo e sensori. Serve a ridurre il bias del dataset
     """
-    sterzo   = Y[:, 0]
-    mask_rec = np.abs(sterzo) > SOGLIA_STERZO_RECUPERO
 
-    n_originali = np.sum(mask_rec)
-    if n_originali == 0:
-        print("Nessun campione di recupero trovato. Oversampling saltato.")
+    #copiamo dapprima gli array
+    X_spec = X.copy() 
+    Y_spec = Y.copy()
+
+    #Invertiamo ora i sensori
+    X_spec[:, :19] = X[:, 18::-1] #track
+    X_spec[: , 20] = -X[:,20] #angle
+    X_spec[:,21]=-X[:,21] #trackpos
+
+    #Invertiamo lo sterzo
+    Y_spec[:,0] = -Y[:,0]
+
+    #non invertiamo naturalmente i pedali
+    #Impiliamo nello stack tutti i dati
+    X_out = np.vstack([X,X_spec])
+    Y_out = np.vstack([Y,Y_spec])
+    
+    #Eseguiamo uno shuffle dei dati: idx contiene tutti gli indici permutati
+    idx = np.random.permutation(len(X_out))
+    print(f" Dataset specchiato: {len(X):,} -> {len(X_out):,} campioni. "
+          f"Bias sterzo: {Y[:, 0].mean():+.4f} -> {Y_out[:, 0].mean():+.4f}")
+    return X_out[idx], Y_out[idx]
+
+
+
+def bilancia_con_jitter(X: np.ndarray, Y: np.ndarray):
+    """
+    Oversampling dei campioni di recupero con jitter gaussiano sui sensori.
+ 
+    Il jitter è applicato solo ai 19 sensori track (colonne 0:19),
+    non ad angle, trackPos, rpm né alle azioni target.
+    Rumore std=0.015 ≈ 3m su scala reale (sensori normalizzati /200).
+    """
+
+    #calcoliamo come sempre il vettore maschera che mi indica chi elemento supera quella soglia
+    mask_rec = np.abs(Y[:, 0]) > SOGLIA_STERZO_RECUPERO
+    #conta quante volte è stato superato
+    n_orig   = mask_rec.sum()
+ 
+    if n_orig == 0:
+        print(" Nessun campione di recupero. Oversampling saltato.")
         return X, Y
-
-    #X[mask-rec] recupera prima tutti i campioni che hanno maschera vera
-    #np.tile prende il vettore mascherato e lo ripete N volte per sovrapopolarlo
-    X_rec = np.tile(X[mask_rec], (OVERSAMPLE_RECUPERO - 1, 1))
-    Y_rec = np.tile(Y[mask_rec], (OVERSAMPLE_RECUPERO - 1, 1))
-
-    #fatto questo bisogna impilare le cose nuove con oversampling al vecchio dataset
-    X_out = np.vstack([X, X_rec])
-    Y_out = np.vstack([Y, Y_rec])
-
-    # PASSAGGIO FONDAMENTALE : Shuffle finale per mescolare i duplicati con i campioni originali
-    #idx è un vettore di indici permutati di lunghezza pari a tutto il dataset + oversampling
-    idx    = np.random.permutation(len(X_out))
-    #in questo modo possiamo mescolare i vettori
-    X_out  = X_out[idx]
-    Y_out  = Y_out[idx]
-
-    n_aggiunti = len(X_rec)
-
-    #stampa di debug
-    print(f"  ✅ Oversampling: aggiunti {n_aggiunti:,} campioni di recupero "
-          f"(da {n_originali:,} originali × {OVERSAMPLE_RECUPERO - 1}). "
+ 
+    X_rec_base = X[mask_rec]
+    Y_rec_base = Y[mask_rec]
+    X_extra, Y_extra = [], []
+ 
+    for _ in range(OVERSAMPLE_RECUPERO - 1):
+        X_copy = X_rec_base.copy()
+        # Jitter solo sui sensori track (prime 19 colonne)
+        #creiamo un rumore "bianco" di dimensione pari a quello dei sensori
+        rumore = np.random.normal(0, JITTER_SENSORI_STD, X_copy[:, :19].shape)
+        X_copy[:, :19] = np.clip(X_copy[:, :19] + rumore, 0.0, 1.0)
+        X_extra.append(X_copy)
+        Y_extra.append(Y_rec_base.copy())
+    
+    #come prima impiliamo i valori e restituiamoloi
+    X_out = np.vstack([X] + X_extra)
+    Y_out = np.vstack([Y] + Y_extra)
+    idx   = np.random.permutation(len(X_out))
+ 
+    n_agg = len(X_out) - len(X)
+    print(f"  ✅ Oversampling con jitter: +{n_agg:,} campioni recupero "
+          f"(da {n_orig:,} × {OVERSAMPLE_RECUPERO - 1}). "
           f"Totale: {len(X_out):,}")
-    return X_out, Y_out
+    return X_out[idx], Y_out[idx]
+
+
+def calcola_sample_weights(Y_sterzo: np.ndarray) -> np.ndarray:
+    """
+    Assegna un peso ad ogni campione del training set.
+ 
+    Il fit() di Keras moltiplica la loss di ogni campione per il suo peso.
+    Campioni con peso alto contano di più nell'aggiornamento del gradiente.
+ 
+    Distribuzione pesi:
+      Rettilineo  (|s| <= 0.15) -> peso 1.0   (baseline)
+      Curva       (|s| <= 0.35) -> peso 2.0   (2 x più importante)
+      Recupero    (|s| > 0.35) -> peso 3.5   (3.5 x più importante)
+
+    """
+    #andaimo a dare una dimensione allo sterzo
+    sterzo  = Y_sterzo.flatten()
+
+    #creiamo dapprima i pesi con tutti uno
+    pesi    = np.ones(len(sterzo), dtype=np.float32)
+      
+    #creiamo la maschera dei diversi pesi
+    mask_curva = ((np.abs(sterzo) > SOGLIA_STERZO_CURVA) &
+                  (np.abs(sterzo) <= SOGLIA_STERZO_RECUPERO))
+    mask_recup = np.abs(sterzo) > SOGLIA_STERZO_RECUPERO
+    
+    #dove è vero diamo diversi pesi al modello
+    pesi[mask_curva] = PESO_CAMPIONE_CURVA
+    pesi[mask_recup] = PESO_CAMPIONE_RECUPERO
+    
+    #ritorniamo il vettore di pesi
+    print(f"  ⚖️  Sample weights: rettilineo=1.0, "
+          f"curva={PESO_CAMPIONE_CURVA}, "
+          f"recupero={PESO_CAMPIONE_RECUPERO}")
+    return pesi
+ 

@@ -16,14 +16,15 @@ from sklearn.model_selection import train_test_split
 import tensorflow as tf
 from tensorflow import keras
 from tensorflow.keras import layers, models, Input, callbacks
-from analisiDataset import analizza_dataset, bilancia_dataset
+from analisiDataset import analizza_dataset, specchia_dataset, bilancia_con_jitter, calcola_sample_weights
 from modello import costruisci_modello, salva_grafici,valuta_per_categoria
 from normalizzatore import normalizza_dataset
 
 from config import (EPOCHE_MAX, BATCH_SIZE,
                     LEARNING_RATE ,TEST_SIZE ,RANDOM_STATE , LOSS_WEIGHT_STERZO,LOSS_WEIGHT_PEDALI,
                     PATIENCE_EARLY_STOP,FATTORE_LR_REDUCE,OVERSAMPLE_RECUPERO,
-                    PATIENCE_LR_REDUCE, LR_MINIMO)
+                    PATIENCE_LR_REDUCE, LR_MINIMO, JITTER_SENSORI_STD,
+                    PESO_CAMPIONE_CURVA,PESO_CAMPIONE_RECUPERO)
 
 
 def main():
@@ -41,20 +42,15 @@ def main():
     
 
     # ── 2. ANALISI DEL DATASET FORNITO
-    analizza_dataset(X, Y_tutto)
+    bias = abs(Y_tutto[:,0].mean())
+    if bias > 0.05:
+        risposta = input(f"Sterzo medio = {bias}. Specchiare il dataset per correggere? [s/N]:")
+        if risposta == 's':
+            X,Y_tutto = specchia_dataset(X, Y_tutto)
 
-    # ── 3. BILANCIAMENTO DEL DATASET
-    print("⚖️   Bilanciamento dataset (oversampling recuperi)...")
-    X_bil, Y_bil = bilancia_dataset(X, Y_tutto)
-
-    # Separazione uscite dopo il bilanciamento
-    Y_sterzo = Y_bil[:, 0:1]
-    Y_pedali = Y_bil[:, 1:3]
-
-    # ── 4. SPLIT ───────────────────────────────────────────────────────────────
-    # Nota: usiamo il dataset NON bilanciato per il test
-    # deve rispecchiare la distribuzione reale, non quella artificiale
     
+
+    # ── 3. SPLIT 
     #ricaviamo sterzo e pedali originali del dataset
     Y_sterzo_orig = Y_tutto[:, 0:1]
     Y_pedali_orig = Y_tutto[:, 1:3]
@@ -66,18 +62,21 @@ def main():
         X, Y_sterzo_orig, Y_pedali_orig,
         test_size=TEST_SIZE, random_state=RANDOM_STATE, shuffle=True
     )
-
-    # Bilancia solo il training set
+    
+    # 4. Bilancia solo il training set
     #impiliamo le cose splittate con train-test
     Y_train_raw = np.hstack([y_st_train_raw, y_pe_train_raw])
     #bilanciamo il dataset di training
-    X_train, Y_train_bil = bilancia_dataset(X_train_raw, Y_train_raw)
+    X_train, Y_train_bil = bilancia_con_jitter(X_train_raw, Y_train_raw)
     #ricaviamo i valori di uscita bilanciati di sterzo e pedali
     y_st_train = Y_train_bil[:, 0:1]
     y_pe_train = Y_train_bil[:, 1:3]
 
     print(f"\n  Train: {len(X_train):,} campioni  |  "
           f"Val: {len(X_val):,} campioni")
+    
+    # 6. Ora calcoliamo i valori dei pesi del nostro training set
+    sample_peso = calcola_sample_weights(y_st_train)
 
     # 5. MODELLO 
     print("\n🧠  Costruzione modello...")
@@ -89,18 +88,9 @@ def main():
     #compiliamo il modello 
     modello.compile(
         optimizer=keras.optimizers.Adam(learning_rate=LEARNING_RATE),
-        loss={
-            'uscita_sterzo': 'mse',
-            'uscita_pedali': 'mse'
-        },
-        loss_weights={
-            'uscita_sterzo': LOSS_WEIGHT_STERZO,
-            'uscita_pedali': LOSS_WEIGHT_PEDALI
-        },
-        metrics={
-            'uscita_sterzo': ['mae'],
-            'uscita_pedali': ['mae']
-        }
+        loss=['mse', 'mse'],
+        loss_weights=[LOSS_WEIGHT_STERZO, LOSS_WEIGHT_PEDALI],
+        metrics=['mae', 'mae']
     )
 
     # 6. CALLBACKS : Tensorflow implementa anche algoritmi asincroni per richiamare il modello tramite eventi
@@ -128,15 +118,18 @@ def main():
     print(f"\n🏋️  Training (max {EPOCHE_MAX} epoche, EarlyStopping patience={PATIENCE_EARLY_STOP})...")
     history = modello.fit(
         X_train,
-        {'uscita_sterzo': y_st_train, 'uscita_pedali': y_pe_train},
-        validation_data=(X_val, {
-            'uscita_sterzo': y_st_val,
-            'uscita_pedali': y_pe_val
-        }), #validation_data non signidica che il modello impara dal test set, ma serve per calcolare la val_loss
+        # Passiamo i target come lista
+        [y_st_train, y_pe_train],
+        validation_data=(
+            X_val, 
+            [y_st_val, y_pe_val]
+        ), 
         epochs=EPOCHE_MAX,
-        batch_size=BATCH_SIZE, #quanti dati guarda ogni volta
-        callbacks=[cb_stop, cb_lr], #aggiungiamo le callback 
-        verbose=1
+        batch_size=BATCH_SIZE, 
+        callbacks=[cb_stop, cb_lr], 
+        verbose=1,
+        # Passiamo i pesi come lista
+        sample_weight=[sample_peso, sample_peso] 
     )
 
     epoca_migliore = np.argmin(history.history['val_loss']) + 1
@@ -168,6 +161,9 @@ def main():
         "learning_rate_init": LEARNING_RATE,
         "oversample_recupero": OVERSAMPLE_RECUPERO,
         "loss_weight_sterzo": LOSS_WEIGHT_STERZO,
+        "jitter_std": JITTER_SENSORI_STD,
+        "peso_curva" : PESO_CAMPIONE_CURVA,
+        "peso_recupero" : PESO_CAMPIONE_RECUPERO
     }
     path_meta = os.path.join(cartella, f"{nome}_meta.json")
     with open(path_meta, 'w') as f:
