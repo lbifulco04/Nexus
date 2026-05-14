@@ -5,10 +5,9 @@ import random
 
 #Nomi dei file JSONL
 file_da_unire = [
-    'tracciato_completo.json',
-    'data_recupero_sbandata.json',
-    'data_recupero_testacoda.json',
-    'data_recupero_erba.json'
+    'dataset_v1.json',
+    'expert_data_full.json'
+
 ]
 
 def crea_dataset_finale(lista_file, file_uscita):

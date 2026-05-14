@@ -1,89 +1,203 @@
 import numpy as np
+import os
+import json
 from sklearn.model_selection import train_test_split
+import tensorflow as tf
 from tensorflow import keras
-from tensorflow.keras import layers, models, Input
-from normalizzatore import normalizza_dataset 
+from tensorflow.keras import layers, models, Input, callbacks
 
-# 1. CARICAMENTO DATI
-# La  funzione restituisce X (sensori) e Y (tutte le azioni insieme)
-path = input("fornisci il percorso del dataset: ")
-X, Y_tutto = normalizza_dataset(path)
+tf.config.set_visible_devices([], 'GPU')
 
-# 2. SEPARAZIONE DELLE AZIONI (Slicing)
-# Y_tutto ha 3 colonne: [0] sterzo, [1] accel, [2] brake
-Y_sterzo = Y_tutto[:, 0:1]  # Prendiamo solo la colonna dello sterzo (importante per la guida)
-Y_pedali = Y_tutto[:, 1:3]  # Prendiamo le colonne 1 e 2 (accel e brake)
+# ──────────────────────────────
+def normalizza_dataset(percorso_file):
+    ingressi_sensori = []
+    uscite_azioni = []
+    with open(percorso_file, 'r') as f:
+        for i, riga in enumerate(f):
+            riga = riga.strip()
+            if not riga:
+                continue
+            try:
+                dati = json.loads(riga)
+                s = dati["sensors"]
+                a = dati["actions"]
+                pista           = np.array(s["track"]) / 200.0
+                velocita        = np.array([s["speedX"] / 300.0])
+                angolo          = np.array([s["angle"] / np.pi])
+                posizione_pista = np.array([s["trackPos"]])
+                giri_motore     = np.array([s["rpm"] / 15000.0])
+                vettore_stato   = np.concatenate([pista, velocita, angolo, posizione_pista, giri_motore])
+                vettore_azione  = [a["steer"], a["accel"], a["brake"], int(a["gear"])]
+                ingressi_sensori.append(vettore_stato)
+                uscite_azioni.append(vettore_azione)
+            except KeyError as e:
+                print(f"⚠️  Riga {i}: chiave mancante {e}")
+            except Exception as e:
+                print(f"❌  Riga {i}: {e}")
+    return np.array(ingressi_sensori), np.array(uscite_azioni)
 
-# 3. DIVISIONE TRAINING / VALIDATION
-X_train, X_val, y_st_train, y_st_val, y_pe_train, y_pe_val = train_test_split(
-    X, Y_sterzo, Y_pedali, test_size=0.2, random_state=42, shuffle=True
-)
-#notare random_state fissato per la ripetibilità dell'esperimento
+# ──────────────────────────────
+SOGLIA_STERZO_RECUPERO = 0.35
+OVERSAMPLE_RECUPERO    = 3
+JITTER_SENSORI_STD     = 0.015
 
-# 4. ARCHITETTURA DEL MODELLO 
-input_sensori = Input(shape=(23,), name="Ingresso_Sensori")
+def specchia_dataset(X, Y):
+    X_spec = X.copy();  Y_spec = Y.copy()
+    X_spec[:, :19] = X[:, 18::-1]
+    X_spec[:, 20]  = -X[:, 20]
+    X_spec[:, 21]  = -X[:, 21]
+    Y_spec[:, 0]   = -Y[:, 0]
+    X_out = np.vstack([X, X_spec])
+    Y_out = np.vstack([Y, Y_spec])
+    idx   = np.random.permutation(len(X_out))
+    print(f"  Dataset specchiato: {len(X)} → {len(X_out)} campioni")
+    return X_out[idx], Y_out[idx]
 
-# Base Comune
-x = layers.Dense(128, activation='relu')(input_sensori) #relu trasforma i valori negativi in 0
-#il primo strato presenta ben 128 neuroni che prendono in input tutti i sensori
+def bilancia_con_jitter(X, Y):
+    mask_rec = np.abs(Y[:, 0]) > SOGLIA_STERZO_RECUPERO
+    n_orig   = mask_rec.sum()
+    if n_orig == 0:
+        print("  Nessun campione di recupero. Oversampling saltato.")
+        return X, Y
+    X_rec = X[mask_rec];  Y_rec = Y[mask_rec]
+    X_extra, Y_extra = [], []
+    for _ in range(OVERSAMPLE_RECUPERO - 1):
+        X_copy = X_rec.copy()
+        rumore = np.random.normal(0, JITTER_SENSORI_STD, X_copy[:, :19].shape)
+        X_copy[:, :19] = np.clip(X_copy[:, :19] + rumore, 0.0, 1.0)
+        X_extra.append(X_copy);  Y_extra.append(Y_rec.copy())
+    X_out = np.vstack([X] + X_extra)
+    Y_out = np.vstack([Y] + Y_extra)
+    idx   = np.random.permutation(len(X_out))
+    print(f"  Oversampling recuperi: +{len(X_out)-len(X)} campioni (da {n_orig})")
+    return X_out[idx], Y_out[idx]
 
-#Durante l'allenamento, "spegne" casualmente il 20% dei neuroni in ogni ciclo
-#permettendo di evitare casi di overfittinig, e dunque la rete trova nuovi modi per risolvere il problema
-x = layers.Dropout(0.2)(x)
+# ──────────────────────────────
+def costruisci_modello(num_classi_gear):
+    inp = Input(shape=(23,), name="Ingresso_Sensori")
+    x   = layers.Dense(128, activation='relu')(inp)
+    x   = layers.Dense(128, activation='relu')(x)
+    out_sterzo = layers.Dense(1, activation='tanh',    name="uscita_sterzo")(x)
+    out_pedali = layers.Dense(2, activation='sigmoid', name="uscita_pedali")(x)
+    out_gear   = layers.Dense(num_classi_gear, activation='softmax', name="uscita_gear")(x)
 
-#inseriamo poi due layers con rispettivamente 64 e 32 
-x = layers.Dense(64, activation='relu')(x)
-x = layers.Dense(32, activation='relu')(x)
+    return models.Model(inputs=inp, outputs=[out_sterzo, out_pedali, out_gear])
 
-# Uscite separate
-out_sterzo = layers.Dense(1, activation='tanh', name="uscita_sterzo")(x)
-out_pedali = layers.Dense(2, activation='sigmoid', name="uscita_pedali")(x)
+# ──────────────────────────────
+def crea_callbacks(nome_checkpoint):
+    early = callbacks.EarlyStopping(
+        monitor='val_loss', patience=25,
+        restore_best_weights=True, verbose=1
+    )
+    reduce_lr = callbacks.ReduceLROnPlateau(
+        monitor='val_loss', factor=0.5,
+        patience=10, min_lr=1e-6, verbose=1
+    )
+    checkpoint = callbacks.ModelCheckpoint(
+        f'{nome_checkpoint}_best.keras',
+        monitor='val_loss', save_best_only=True, verbose=1
+    )
+    return [early, reduce_lr, checkpoint]
 
-#il modello è in grado di dare dati 19 input , 3 output che sono sterzo, freno e pedali
-modello = models.Model(inputs=input_sensori, outputs=[out_sterzo, out_pedali])
+# ──────────────────────────────
+def main():
+    print("🏎️   Addestramento Imitation Learning — TORCS")
+    print("=" * 55)
 
-tasso_apprendimento = 0.0001
+    path = input("\nPercorso del dataset: ").strip()
+    if not os.path.exists(path):
+        print(f"❌ File non trovato: {path}")
+        return
 
-# 5. COMPILAZIONE
-modello.compile(
-    # Creiamo l'oggetto Adam e gli passiamo il parametro 'learning_rate'
-    optimizer=keras.optimizers.Adam(learning_rate=tasso_apprendimento),
-    #adam è l'algoritmo di ottimizzazione utilizzato"
-    
-    loss={'uscita_sterzo': 'mse', 'uscita_pedali': 'mse'},
-    #per la perdita si deve calcolare l'MSE
-    loss_weights={'uscita_sterzo': 1.0, 'uscita_pedali': 0.5},
-    #il peso dello sterzo è maggiore dei pedali già dall'inzio
-    
-    #Specifichiamo la metrica per ogni ramo usando un dizionario
-    metrics={
-        'uscita_sterzo': ['mae'],
-        'uscita_pedali': ['mae']
-    }
-)
+    X, Y_tutto = normalizza_dataset(path)
+    print(f"  Campioni caricati: {len(X)}")
 
-# 6. ADDESTRAMENTO
-print("\n🏎️ Allenamento in corso con output differenziati...")
-modello.fit(
-    #valori dei sensori in ingresso del training set
-    X_train, 
+    bias = abs(Y_tutto[:, 0].mean())
+    if bias > 0.05:
+        risp = input(f"  Sterzo medio = {bias:.3f}. Specchiare il dataset? [s/N]: ")
+        if risp.lower() == 's':
+            X, Y_tutto = specchia_dataset(X, Y_tutto)
 
-    #valori in uscita del training set
-    {'uscita_sterzo': y_st_train, 'uscita_pedali': y_pe_train},
-    
-    #validazione dei dati sulla base del test set
-    validation_data=(X_val, {'uscita_sterzo': y_st_val, 'uscita_pedali': y_pe_val}),
+    Y_sterzo     = Y_tutto[:, 0:1]
+    Y_pedali     = Y_tutto[:, 1:3]
+    Y_gear       = np.clip(Y_tutto[:, 3].astype(int), -1, 6)
+    Y_gear_class = Y_gear + 1
 
-    #numeor di epoche (quante volte vedere il file in ingresso)
-    epochs=100,
+    num_classi_gear = len(np.unique(Y_gear_class))
+    print(f"  Classi gear: {num_classi_gear}  (valori: {sorted(np.unique(Y_gear_class))})")
 
-    batch_size=32,
+    (X_train_raw, X_val,
+     y_st_raw, y_st_val,
+     y_pe_raw, y_pe_val,
+     y_ge_raw, y_ge_val) = train_test_split(
+        X, Y_sterzo, Y_pedali, Y_gear_class,
+        test_size=0.2, random_state=42, shuffle=True
+    )
+    y_ge_val = np.clip(y_ge_val.astype(int), 0, num_classi_gear - 1)
 
-    #vediamo visivamente l'apprendimento
-    verbose=1
-)
+    Y_train_raw = np.hstack([y_st_raw, y_pe_raw, y_ge_raw.reshape(-1, 1)])
+    X_train, Y_bil = bilancia_con_jitter(X_train_raw, Y_train_raw)
 
-# 7. SALVATAGGIO
-nome = input("\n💾 Nome del modello: ")
-modello.save(f"{nome}.h5")
-print(f"✅ Modello '{nome}.h5' pronto per la sfida IBM RACE!")
+    y_st_train = Y_bil[:, 0:1]
+    y_pe_train = Y_bil[:, 1:3]
+    y_ge_train = np.clip(Y_bil[:, 3].astype(int), 0, num_classi_gear - 1)
+
+    print(f"  Train: {len(X_train)} | Val: {len(X_val)}")
+
+    print("\n🧠 Costruzione modello...")
+    modello = costruisci_modello(num_classi_gear)
+    modello.summary()
+
+    modello.compile(
+        optimizer=keras.optimizers.Adam(learning_rate=0.001),
+        loss={
+            'uscita_sterzo': 'mse',
+            'uscita_pedali': 'mse',
+            'uscita_gear':   'sparse_categorical_crossentropy'
+        },
+        loss_weights={
+            'uscita_sterzo': 2.0,
+            'uscita_pedali': 0.5,
+            'uscita_gear':   0.3
+        },
+        metrics={
+            'uscita_sterzo': ['mae'],
+            'uscita_pedali': ['mae'],
+            'uscita_gear':   ['accuracy']
+        }
+    )
+
+    nome = input("\n💾 Nome del modello (usato anche per il checkpoint): ").strip() or "modello_torcs"
+    cb_list = crea_callbacks(nome)
+
+    print(f"\n🏋️   Training (max 300 epoche)...")
+    history = modello.fit(
+        X_train,
+        {
+            'uscita_sterzo': y_st_train,
+            'uscita_pedali': y_pe_train,
+            'uscita_gear':   y_ge_train
+        },
+        validation_data=(
+            X_val,
+            {
+                'uscita_sterzo': y_st_val,
+                'uscita_pedali': y_pe_val,
+                'uscita_gear':   y_ge_val
+            }
+        ),
+        epochs=300,
+        batch_size=128,
+        callbacks=cb_list,
+        verbose=1
+    )
+
+    miglior_epoca = np.argmin(history.history['val_loss']) + 1
+    val_loss_min  = min(history.history['val_loss'])
+    print(f"\n✅ Miglior epoca: {miglior_epoca}  |  val_loss: {val_loss_min:.5f}")
+
+    modello.save(f"{nome}.keras")
+    print(f"✅ Salvato '{nome}.keras'  (checkpoint: '{nome}_best.keras')")
+
+if __name__ == "__main__":
+    main()

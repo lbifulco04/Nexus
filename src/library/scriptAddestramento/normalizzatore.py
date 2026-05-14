@@ -3,7 +3,7 @@ import numpy as np
 
 def normalizza_dataset(percorso_file):
     ingressi_sensori = [] 
-    uscite_azioni = []    
+    uscite_azioni = []    # conterrà [steer, accel, brake, gear]
     
     with open(percorso_file, 'r') as f:
         for i, riga in enumerate(f):
@@ -13,33 +13,23 @@ def normalizza_dataset(percorso_file):
             
             try:
                 dati = json.loads(riga)
-                
-                # Estraiamo i blocchi principali
                 s = dati["sensors"]
                 a = dati["actions"]
                 
-                # --- 1. PREPARAZIONE INGRESSI (SENSORI) CON NORMALIZZAZIONE DEI DATI ---
-                # 19 sensori track (0-200m -> scalati 0-1)
+                # Sensori
                 pista = np.array(s["track"]) / 200.0
-                
-                # Velocità 
                 velocita = np.array([s["speedX"] / 300.0])
-                
-                # Angolo rispetto alla pista (range -1, 1)
                 angolo = np.array([s["angle"] / np.pi])
-                
-                # Posizione sulla carreggiata (0 centro, 1 bordi)
                 posizione_pista = np.array([s["trackPos"]])
-                
-                # Giri motore (normalizzati su 15.000 RPM)
                 giri_motore = np.array([s["rpm"] / 15000.0])
-
-                # Creiamo il vettore di stato (23 elementi totali)
                 vettore_stato = np.concatenate([pista, velocita, angolo, posizione_pista, giri_motore])
                 
-                # --- 2. PREPARAZIONE USCITE (AZIONI) ---
-                # Lo sterzo è già in range [-1, 1], accel e brake [0, 1]
-                vettore_azione = [a["steer"], a["accel"], a["brake"]]
+                # Azioni (ora includiamo anche la marcia)
+                # Convertiamo la marcia in un intero compreso tra -1 e 6
+                gear = int(a["gear"])
+                # Per sicurezza limitiamo il range (TORCS usa -1..6)
+                gear = max(-1, min(gear, 6))
+                vettore_azione = [a["steer"], a["accel"], a["brake"], gear]
                 
                 ingressi_sensori.append(vettore_stato)
                 uscite_azioni.append(vettore_azione)
