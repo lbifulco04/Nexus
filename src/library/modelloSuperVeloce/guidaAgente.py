@@ -75,11 +75,11 @@ def main():
             # 2. Esecuzione rapida
             previsione = inferenza_veloce(input_ia)
             
-            # 3. Estrazione tensori SICURA (Fix per l'errore "slice scalar input")
+            # 3. Estrazione tensori SICURA 
             # Flatten converte qualsiasi output in un array monodimensionale piatto [accel, brake, steer]
             valori_predetti = previsione.numpy().flatten()
             
-            # L'ordine dipende da come hai strutturato 'y' nel file di addestramento.
+            
             # Basandoci sul nostro script precedente: y = [accel, brake, steer]
             acceleratore = float(valori_predetti[0])
             freno = float(valori_predetti[1])
@@ -94,7 +94,7 @@ def main():
             if freno > 0.05:
                 acceleratore = 0.0
 
-            # 5. Logica cambio calibrata per la monoposto (motore ad alti regimi)
+            # 5. Logica cambio calibrata per la monoposto di src_server1 (motore ad alti regimi)
             rpm = client.S.d.get('rpm', 0)
             marcia = client.S.d.get('gear', 1)
             
