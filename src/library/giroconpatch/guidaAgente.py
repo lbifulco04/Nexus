@@ -124,7 +124,7 @@ def main():
             ticks = client.S.d.get('ticks', 0)
             if ticks % 10 == 0:
                 # Aggiungiamo un indicatore visivo nel log quando la patch è attiva
-                patch_attiva = "⚠️ FRENATA FORZATA" if (3100 <= distanza <= 3250 and client.S.d.get('speedX', 0)*3.6 > 90) else ""
+                patch_attiva = "⚠️ FRENATA FORZATA" if (3180 <= distanza <= 3210 and client.S.d.get('speedX', 0)*3.6 > 105) else ""
                 print(f"\r🤖 Watson | S: {sterzo:5.2f} | A: {acceleratore:4.2f} | F: {freno:4.2f} | M: {marcia} | Dist: {distanza:.0f}m {patch_attiva}  ", end="")
 
     except KeyboardInterrupt:
